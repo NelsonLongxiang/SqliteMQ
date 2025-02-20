@@ -4,6 +4,7 @@
 # @Author : 龙翔
 # @File    :sql_queue.py
 # @Software: PyCharm
+import datetime
 import json
 import os
 import sqlite3
@@ -11,7 +12,7 @@ import sys
 import threading
 import time
 import uuid
-from queue import Queue
+from queue import Queue, Empty
 
 # 将当前文件夹添加到环境变量
 if os.path.basename(__file__) in ['run.py', 'main.py', '__main__.py']:
@@ -56,9 +57,16 @@ class SqliteQueue:
         self.conn.commit()
         return 'ok'
 
-    def ack_put(self, id_, data):
-        self.cursor.execute(f"INSERT INTO {self.ack_queue_name} (id,data) VALUES (?,?)", (id_, data))
+    def put_mul(self, data_list):
+        # 开启事务
+        self.cursor.execute("BEGIN TRANSACTION")
+        for data in data_list:
+            self.cursor.execute(f"INSERT INTO {self.queue_name} (data) VALUES (?)", (data,))
         self.conn.commit()
+        return 'ok'
+
+    def ack_put(self, id_, data):
+        self.cursor.execute(f"REPLACE INTO {self.ack_queue_name} (id,data) VALUES (?,?)", (id_, data))
         return 'ok'
 
     def get(self):
@@ -75,6 +83,7 @@ class SqliteQueue:
     def get_all(self):
         self.cursor.execute(
             f"SELECT id,data,CAST(strftime('%s',created_at) as INTEGER) FROM {self.queue_name} ORDER BY created_at ASC")
+        self.conn.commit()
         rows = self.cursor.fetchall()
         if rows:
             return rows
@@ -82,6 +91,7 @@ class SqliteQueue:
 
     def size(self):
         self.cursor.execute(f"SELECT COUNT(*) FROM {self.queue_name}")
+        self.conn.commit()
         count = self.cursor.fetchone()[0]
         return count
 
@@ -92,21 +102,29 @@ class SqliteQueue:
         return 'ok'
 
     def close(self):
-        self.conn.close()
         self.cursor.close()
+        self.conn.close()
         return 'ok'
 
     def get_mul(self, num):
         self.cursor.execute(f"SELECT * FROM {self.queue_name} ORDER BY created_at ASC LIMIT ?", (num,))
+        self.conn.commit()
         rows = self.cursor.fetchall()
         if rows:
+            ids = [row[0] for row in rows]
+            placeholders = ','.join('?' for _ in ids)
+            self.cursor.execute("BEGIN TRANSACTION")
+            self.cursor.execute(f"DELETE FROM {self.queue_name} WHERE id IN ({placeholders})", ids)
+            self.conn.commit()
             return rows
-        return None
+        return []
 
     def re_data(self):
         self.cursor.execute(f"SELECT * FROM {self.ack_queue_name}")
+        self.conn.commit()
         rows = self.cursor.fetchall()
         if rows:
+            self.cursor.execute("BEGIN TRANSACTION")
             for row in rows:
                 self.cursor.execute(f"INSERT INTO {self.queue_name} (data) VALUES (?)", (row[1],))
                 self.cursor.execute(f"DELETE FROM {self.ack_queue_name} WHERE id=?", (row[0],))
@@ -122,8 +140,10 @@ class SqliteQueue:
         self.conn.commit()
         return 'ok'
 
-    def ack_delete(self, id_):
-        self.cursor.execute(f"DELETE FROM {self.ack_queue_name} WHERE id=?", (id_,))
+    def ack_delete(self, ids_):
+        self.cursor.execute("BEGIN TRANSACTION")
+        for id_ in ids_:
+            self.cursor.execute(f"DELETE FROM {self.ack_queue_name} WHERE id=?", (id_,))
         self.conn.commit()
         return 'ok'
 
@@ -170,51 +190,76 @@ class SqlQueueTask:
         self.switch = True
         self.re_flag = False
         self.ack_timeout_limit = 0
+        self.get_count_limit = 1
 
     def run(self):
         sql_queue = SqliteQueue(self.topic, db_path_dir=self.db_path_dir)
         sql_queue.re_data()
         while self.switch:
-            if self.re_flag:
-                sql_queue.re_data()
-                self.re_flag = True
-            if self._clear:
-                sql_queue.clear()
-                self._clear = False
-                continue
-            while self.put_queue.qsize():
-                sql_queue.put(self.put_queue.get())
-                continue
-            while self.get_queue.qsize():
-                self.get_queue.get()
-                self.result_queue.put(sql_queue.get())
-                continue
-            while self.ack_delete_queue.qsize():
-                sql_queue.ack_delete(self.ack_delete_queue.get())
+            try:
+                self.inspect_ack_timeout(sql_queue)
+                self.size = sql_queue.qsize() + self.result_queue.qsize()
                 self._ack_keys = sql_queue.ack_keys()
-                continue
-            while self.ack_put_queue.qsize():
-                sql_queue.ack_put(*self.ack_put_queue.get())
-                self._ack_keys = sql_queue.ack_keys()
-                continue
-            if self._close:
-                sql_queue.close()
-                break
+                if self.re_flag:
+                    sql_queue.re_data()
+                    self.re_flag = True
+                if self._clear:
+                    sql_queue.clear()
+                    self._clear = False
+                    continue
 
-            self.inspect_ack_timeout(sql_queue)
-            self.size = sql_queue.qsize()
-            self._ack_keys = sql_queue.ack_keys()
-            time.sleep(0.1)
+                while self.ack_put_queue.qsize():
+                    sql_queue.cursor.execute("BEGIN TRANSACTION")
+                    [sql_queue.ack_put(*self.ack_put_queue.get()) for i in range(self.ack_put_queue.qsize())]
+                    sql_queue.conn.commit()
+                    self._ack_keys = sql_queue.ack_keys()
+                    continue
+
+                while self.ack_delete_queue.qsize() and self.ack_put_queue.qsize() == 0:
+                    sql_queue.ack_delete([self.ack_delete_queue.get() for _ in range(self.ack_delete_queue.qsize())])
+                    self._ack_keys = sql_queue.ack_keys()
+                    continue
+
+                while self.get_queue.qsize() and sql_queue.qsize() and self.result_queue.qsize() < 10:
+                    self.get_queue.get()
+                    if self.get_count_limit == 1:
+                        self.result_queue.put(sql_queue.get())
+                    else:
+                        [self.result_queue.put(res) for res in sql_queue.get_mul(self.get_count_limit)]
+                    continue
+
+                while self.put_queue.qsize():
+                    sql_queue.put(self.put_queue.get_nowait())
+                    if self.put_queue.qsize() > self.get_count_limit:
+                        d = []
+                        try:
+                            for _ in range(100):
+                                d.append(self.put_queue.get_nowait())
+                        except Empty:
+                            print("put_queue is empty")
+                        sql_queue.put_mul(d)
+
+                if self._close:
+                    sql_queue.close()
+                    break
+
+                time.sleep(1)
+            except Exception as e:
+                print(e, e.__traceback__.tb_lineno, self.topic)
+        print("队列结束！！！！")
 
     def start(self):
         threading.Thread(target=self.run).start()
+        # threading.Thread(target=self.direct).start()
 
     def get(self):
-        self.get_queue.put(1)
-        while True:
-            if self.result_queue.qsize():
-                return self.result_queue.get()
-            time.sleep(0.1)
+        if self.result_queue.qsize():
+            try:
+                return self.result_queue.get_nowait()
+            except Empty:
+                return None
+        if self.get_queue.qsize() < 10:
+            self.get_queue.put(1)
 
     def put(self, data):
         if isinstance(data, (list, tuple, dict)):
@@ -235,9 +280,10 @@ class SqlQueueTask:
         self.ack_delete_queue.put(_id)
         self.waiting_queue(self.ack_delete_queue)
 
-    def waiting_queue(self, q):
+    @staticmethod
+    def waiting_queue(q):
         while q.qsize():
-            time.sleep(0.1)
+            time.sleep(0.5)
 
     def ack_keys(self):
         return self._ack_keys
@@ -261,6 +307,15 @@ class SqlQueueTask:
                 if self.ack_timeout_limit and time.time() - t > self.ack_timeout_limit:
                     sql_queue.ack_delete(id_)
                     self.put(data)
+
+    # 直连
+    def direct(self):
+        while self.switch:
+            if self.put_queue.qsize() and self.get_queue.qsize():
+                self.get_queue.get()
+                self.result_queue.put((0, self.put_queue.get(), ""))
+            else:
+                time.sleep(1)
 
 
 class SqlMQ:
