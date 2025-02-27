@@ -34,7 +34,9 @@ class SqliteQueue:
         :param db_path_dir: db存放位置
         '''
         self.topic = queue_name
-        self.conn = sqlite3.connect(os.path.join(db_path_dir, "queues", "queue_" + queue_name + '.db'))
+        self.db_path_dir = os.path.join(db_path_dir, "queues")
+        os.makedirs(self.db_path_dir, exist_ok=True)
+        self.conn = sqlite3.connect(os.path.join(self.db_path_dir, "queue_" + queue_name + '.db'))
         self.cursor = self.conn.cursor()
         self.queue_name = queue_name
         self.ack_queue_name = f"ack_{queue_name}"
