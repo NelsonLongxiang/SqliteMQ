@@ -25,11 +25,11 @@ if __name__ == '__main__':
     test_queue = SqlQueueTask("test", './')
     test_queue.start()
 
-    test_queue.put("test1")
+    test_queue.pul_mul(["test1"]*1000)
     test_queue.put("test2")
     print(test_queue.get())
     test_mq = SqlMQ()
-    test_mq.start_receive(callback=lambda ch, body: print(ch, body) or time.sleep(5) or ch.basic_ack(),
-                          sql_server=test_queue, count=1)
+    test_mq.start_receive(callback=lambda ch, body: print(ch, body) or ch.basic_ack(),
+                          sql_server=test_queue,count=1)
     test_mq.stop()
     test_queue.stop()

@@ -235,7 +235,7 @@ class SqlQueueTask:
                         self.inspect_ack_timeout(sql_queue)
                 except Empty:
                     self.inspect_ack_timeout(sql_queue)
-                    time.sleep(0.5)
+                    time.sleep(0.1)
             except Exception as e:
                 print(e, e.__traceback__.tb_lineno, self.topic)
 
@@ -284,7 +284,7 @@ class SqlQueueTask:
             return self.result_queue.get_nowait()
         except Empty:
             self.work_queue.put(("get_work", (None,)))
-            time.sleep(1)
+            time.sleep(0.1)
             return None
 
     def put(self, data):
@@ -364,7 +364,7 @@ class SqlMQ:
                 if count == 1:
                     return
                 continue
-            time.sleep(1)
+            time.sleep(0.1)
 
         sql_server.close()
 
