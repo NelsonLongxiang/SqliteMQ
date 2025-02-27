@@ -4,7 +4,6 @@
 # @Author : 龙翔
 # @File    :sql_queue.py
 # @Software: PyCharm
-import datetime
 import json
 import os
 import sqlite3
@@ -12,7 +11,8 @@ import sys
 import threading
 import time
 import uuid
-from queue import Queue, Empty
+from queue import Empty, Queue
+from multiprocessing import Queue as MPQueue
 
 # 将当前文件夹添加到环境变量
 if os.path.basename(__file__) in ['run.py', 'main.py', '__main__.py']:
@@ -34,7 +34,9 @@ class SqliteQueue:
         :param db_path_dir: db存放位置
         '''
         self.topic = queue_name
-        self.conn = sqlite3.connect(os.path.join(db_path_dir, "queues", "queue_" + queue_name + '.db'))
+        self.db_path_dir = os.path.join(db_path_dir, "queues")
+        os.makedirs(self.db_path_dir, exist_ok=True)
+        self.conn = sqlite3.connect(os.path.join(self.db_path_dir, "queue_" + queue_name + '.db'))
         self.cursor = self.conn.cursor()
         self.queue_name = queue_name
         self.ack_queue_name = f"ack_{queue_name}"
@@ -201,9 +203,9 @@ class SqlQueueTask:
         self.topic = topic
         self.db_path_dir = db_path_dir
 
-        self.work_queue = Queue()
-        self.result_queue = Queue(1)
-        self.ack_queue = Queue(1)
+        self.work_queue = MPQueue()
+        self.result_queue = MPQueue(1)
+        self.ack_queue = MPQueue(1)
         self.db_size = 0
         self.ack_size = 0
 
