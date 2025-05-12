@@ -14,6 +14,7 @@ import uuid
 from queue import Empty, Queue
 from multiprocessing import Queue as MPQueue
 
+get_queue_data_lock = threading.Lock()
 # 将当前文件夹添加到环境变量
 if os.path.basename(__file__) in ['run.py', 'main.py', '__main__.py']:
     if '.py' in __file__:
@@ -357,7 +358,8 @@ class SqlMQ:
                 data = self.link_queue.get()
                 sql_server.put(data)
                 continue
-            data = sql_server.get()
+            with get_queue_data_lock:
+                data = sql_server.get()
             if data:
                 ch = SqlCh(sql_server.topic, data[1], sql_server)
                 callback(ch, data)
